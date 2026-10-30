@@ -1,0 +1,173 @@
+# Builds Phun's PHP 8.4 / 8.5 (cli + fpm) from the php.net source with
+# static-php-cli and publishes them on a public release that Phun setup
+# downloads from. Manual only: run it from the Actions tab.
+#
+# Publishes to this repo's Releases with the built-in token.
+# After it finishes, run Phun's `scripts/pin-php.sh <tag>` for each version tag.
+name: php-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      php84:
+        description: PHP 8.4 patch version
+        default: "8.4.27"
+      php84_sha256:
+        description: SHA-256 of php-<php84>.tar.gz from php.net
+        default: "5bafed9994c1a49796b25b5f61c22c9183bfe046b6acc7b363842d03c77f972f"
+      php85:
+        description: PHP 8.5 patch version
+        default: "8.5.12"
+      php85_sha256:
+        description: SHA-256 of php-<php85>.tar.gz from php.net
+        default: "81a0f450349e84b08eb43faa85f8a4c835684f3cc1c50471775d1317a046c525"
+
+permissions:
+  contents: read
+
+env:
+  SPC_VERSION: "2.8.5"
+  # No swoole: it pulls in c-ares, and a c-ares libcurl ignores /etc/hosts-style
+  # resolution that .test sites rely on. No --with-suggested-libs for the same
+  # reason, so libcurl uses the system resolver.
+  PHP_EXTENSIONS: "apcu,bcmath,bz2,calendar,ctype,curl,dba,dom,event,exif,fileinfo,filter,ftp,gd,gmp,iconv,imagick,imap,intl,mbstring,mysqli,mysqlnd,opcache,openssl,opentelemetry,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+
+jobs:
+  build:
+    name: php-${{ matrix.minor }} ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ["8.4", "8.5"]
+        platform: [linux-x86_64, linux-aarch64, macos-aarch64, macos-x86_64]
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - platform: macos-aarch64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - name: Pick version
+        run: |
+          if [ "${{ matrix.minor }}" = "8.4" ]; then
+            echo "PHP_VERSION=${{ inputs.php84 }}" >> "$GITHUB_ENV"
+            echo "PHP_SHA256=${{ inputs.php84_sha256 }}" >> "$GITHUB_ENV"
+          else
+            echo "PHP_VERSION=${{ inputs.php85 }}" >> "$GITHUB_ENV"
+            echo "PHP_SHA256=${{ inputs.php85_sha256 }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: static-php-cli source
+        run: |
+          git clone --depth 1 --branch "$SPC_VERSION" https://github.com/crazywhalecc/static-php-cli.git "$RUNNER_TEMP/spc"
+
+      - name: php.net source (checked)
+        working-directory: ${{ runner.temp }}/spc
+        run: |
+          mkdir -p php-src-in
+          curl -fsSL --retry 3 -o "php-src-in/php-$PHP_VERSION.tar.gz" \
+            "https://www.php.net/distributions/php-$PHP_VERSION.tar.gz"
+          echo "$PHP_SHA256  php-src-in/php-$PHP_VERSION.tar.gz" | shasum -a 256 -c -
+
+      - name: PHP + composer for spc (macOS)
+        if: startsWith(matrix.platform, 'macos-')
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer
+
+      - name: Build (macOS)
+        if: startsWith(matrix.platform, 'macos-')
+        working-directory: ${{ runner.temp }}/spc
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          composer install --no-dev --no-interaction --prefer-dist
+          bin/spc doctor --auto-fix
+          bin/spc download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
+            --custom-url "php-src:file://$PWD/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
+          bin/spc build "$PHP_EXTENSIONS" --build-cli --build-fpm
+
+      # glibc build in spc's own container, so php can dlopen the bundled
+      # pcov.so (a fully static musl php cannot load shared extensions).
+      - name: Build (Linux, glibc)
+        if: startsWith(matrix.platform, 'linux-')
+        working-directory: ${{ runner.temp }}/spc
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bin/spc-gnu-docker download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
+            --custom-url "php-src:file:///app/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
+          bin/spc-gnu-docker build "$PHP_EXTENSIONS" --build-cli --build-fpm
+
+      - name: Stage
+        run: |
+          src="$RUNNER_TEMP/spc/buildroot/bin"
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p "$stage/bin" "$stage/sbin" dist
+          cp "$src/php" "$stage/bin/php"
+          cp "$src/php-fpm" "$stage/sbin/php-fpm"
+          chmod 755 "$stage/bin/php" "$stage/sbin/php-fpm"
+
+      - name: Verify
+        run: |
+          php="$RUNNER_TEMP/stage/bin/php"
+          "$php" -v
+          "$php" -v | grep -q "PHP $PHP_VERSION"
+          "$php" -i | grep -q "Thread Safety => disabled"
+          mods=$("$php" -m)
+          for m in pdo_sqlite pdo_pgsql sqlite3 pgsql curl openssl intl mbstring; do
+            echo "$mods" | grep -qx "$m" || { echo "missing module $m"; exit 1; }
+          done
+          "$RUNNER_TEMP/stage/sbin/php-fpm" -v
+          if grep -aq "c-ares" "$php"; then echo "libcurl was built with c-ares"; exit 1; fi
+
+      - name: Package
+        run: |
+          name="php-$PHP_VERSION-${{ matrix.platform }}.tar.gz"
+          tar --owner=0 --group=0 -C "$RUNNER_TEMP/stage" -czf "dist/$name" bin sbin 2>/dev/null \
+            || tar -C "$RUNNER_TEMP/stage" -czf "dist/$name" bin sbin
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ matrix.minor }}-${{ matrix.platform }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          for v in "${{ inputs.php84 }}" "${{ inputs.php85 }}"; do
+            tag="php-$v"
+            files=(php-"$v"-*.tar.gz)
+            [ "${#files[@]}" -eq 4 ] || { echo "$tag: expected 4 archives, got ${#files[@]}"; exit 1; }
+            sha256sum "${files[@]}" > "SHA256SUMS-$v"
+            cat "SHA256SUMS-$v"
+            if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+              echo "$tag already exists on $REPO; delete it first to rebuild"; exit 1
+            fi
+            cp "SHA256SUMS-$v" SHA256SUMS
+            gh release create "$tag" --repo "$REPO" --title "PHP $v" \
+              --notes "PHP $v for Phun (cli + fpm, NTS), built from the php.net source with static-php-cli $SPC_VERSION." \
+              "${files[@]}" SHA256SUMS
+          done
