@@ -29,8 +29,9 @@ env:
   SPC_VERSION: "2.8.5"
   # No swoole: it pulls in c-ares, and a c-ares libcurl ignores /etc/hosts-style
   # resolution that .test sites rely on. No --with-suggested-libs for the same
-  # reason, so libcurl uses the system resolver.
-  PHP_EXTENSIONS: "apcu,bcmath,bz2,calendar,ctype,curl,dba,dom,event,exif,fileinfo,filter,ftp,gd,gmp,iconv,imagick,imap,intl,mbstring,mysqli,mysqlnd,opcache,openssl,opentelemetry,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+  # reason, so libcurl uses the system resolver. No imap: it left PHP core in
+  # 8.4 and its PECL source clashes with the pinned php.net tarball.
+  PHP_EXTENSIONS: "apcu,bcmath,bz2,calendar,ctype,curl,dba,dom,event,exif,fileinfo,filter,ftp,gd,gmp,iconv,imagick,intl,mbstring,mysqli,mysqlnd,opcache,openssl,opentelemetry,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
 
 jobs:
   build:
