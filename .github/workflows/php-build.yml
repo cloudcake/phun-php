@@ -66,13 +66,14 @@ jobs:
         run: |
           git clone --depth 1 --branch "$SPC_VERSION" https://github.com/crazywhalecc/static-php-cli.git "$RUNNER_TEMP/spc"
 
+      # Kept under downloads/, which spc-gnu-docker mounts at /app/downloads.
       - name: php.net source (checked)
         working-directory: ${{ runner.temp }}/spc
         run: |
-          mkdir -p php-src-in
-          curl -fsSL --retry 3 -o "php-src-in/php-$PHP_VERSION.tar.gz" \
+          mkdir -p downloads/php-src-in
+          curl -fsSL --retry 3 -o "downloads/php-src-in/php-$PHP_VERSION.tar.gz" \
             "https://www.php.net/distributions/php-$PHP_VERSION.tar.gz"
-          echo "$PHP_SHA256  php-src-in/php-$PHP_VERSION.tar.gz" | shasum -a 256 -c -
+          echo "$PHP_SHA256  downloads/php-src-in/php-$PHP_VERSION.tar.gz" | shasum -a 256 -c -
 
       - name: PHP + composer for spc (macOS)
         if: startsWith(matrix.platform, 'macos-')
@@ -90,7 +91,7 @@ jobs:
           composer install --no-dev --no-interaction --prefer-dist
           bin/spc doctor --auto-fix
           bin/spc download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
-            --custom-url "php-src:file://$PWD/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
+            --custom-url "php-src:file://$PWD/downloads/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
           bin/spc build "$PHP_EXTENSIONS" --build-cli --build-fpm
 
       # glibc build in spc's own container, so php can dlopen the bundled
@@ -102,7 +103,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           bin/spc-gnu-docker download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
-            --custom-url "php-src:file:///app/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
+            --custom-url "php-src:file:///app/downloads/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
           bin/spc-gnu-docker build "$PHP_EXTENSIONS" --build-cli --build-fpm
 
       - name: Stage
